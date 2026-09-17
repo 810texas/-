@@ -21,6 +21,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 中文 Windows 控制台默认 GBK，统一按 UTF-8 输出，避免个别字符打断打印
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    pass
+
 BASE = "http://127.0.0.1:8000/api/v1"
 PASSED: list[str] = []
 FAILED: list[str] = []
