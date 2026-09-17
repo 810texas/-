@@ -286,12 +286,35 @@ def main() -> int:
     status, _ = fin.get("/admin/users")
     expect(status == 403, "财务访问管理员接口 403", f"status={status}")
 
+    # ---------------------------------------------------------------- 收尾
+    # 再留一张「待审核」单据，使库里同时存在 已通过 / 待审核 / 草稿 三种状态，便于演示
+    title("收尾", "再补一张待审核单据，凑齐三种状态便于演示")
+    status, draft3 = emp.post_json("/reimbursements", {"reason": "市场推广物料采购报销（演示用待审核单）"})
+    rid3 = draft3["id"]
+    status, up3 = emp.upload([("fapiao_C.png", make_png(seed=303), "image/png")],
+                             {"reimbursement_id": str(rid3)})
+    inv3 = up3["items"][0]["invoice"]
+    status, fixed3 = emp.patch_json(f"/invoices/{inv3['id']}", {
+        "invoice_type": "蓝字",
+        "invoice_code": f"04400192{SUFFIX}",
+        "invoice_no": f"8{SUFFIX}0003",
+        "amount_excl_tax": 1200.00, "tax_amount": 72.00, "total_amount": 1272.00,
+        "category": "办公", "buyer_name": "示例科技有限公司",
+    })
+    status, sub3 = emp.post_json(f"/reimbursements/{rid3}/submit", {})
+    expect(status == 200 and sub3["reimbursement"]["status"] == "PENDING",
+           "待审核单据已生成", sub3.get("reimbursement", {}).get("code", ""))
+
+    status, mine = emp.get("/reimbursements/mine")
+    states = sorted({r["status"] for r in mine})
+    print(f"  当前库内单据状态：{states}")
+
     # ---------------------------------------------------------------- 汇总
     total = OK + NG
     print(f"\n{'=' * 72}")
     verdict = "全部符合预期" if NG == 0 else f"{NG} 项异常，请检查上面的 [BAD] 行"
     print(f"演示流程结束：{OK}/{total} 步符合预期 —— {verdict}")
-    print(f"本次演示单号：{draft['code']}（重复报销验证单：{draft2['code']}）")
+    print(f"本次演示单号：{draft['code']}（已通过）、{draft2['code']}（草稿·重复拦截）、{draft3['code']}（待审核）")
     print("演示数据已落库，可切到前端用 employee / finance 账号查看")
     print("=" * 72)
     return 0 if NG == 0 else 1
