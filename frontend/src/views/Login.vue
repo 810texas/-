@@ -2,7 +2,6 @@
   <div class="login-wrap">
     <el-card class="login-card">
       <h2 class="title">智能发票报销审核系统</h2>
-      <p class="muted">OCR 自动填单 · 规则化预审 · 全程留痕</p>
       <el-form :model="form" @submit.prevent="onSubmit" label-position="top">
         <el-form-item label="用户名">
           <el-input v-model="form.username" placeholder="请输入用户名" @keyup.enter="onSubmit" />
@@ -57,7 +56,7 @@ async function onSubmit() {
   background: linear-gradient(135deg, #1f2d3d, #3a5169);
 }
 .login-card { width: 380px; padding: 8px 12px; }
-.title { margin: 0 0 4px; font-size: 19px; }
+.title { margin: 0 0 18px; font-size: 19px; }
 .submit { width: 100%; margin-top: 6px; }
 .alert { margin-top: 14px; }
 .demo { margin-top: 14px; line-height: 1.6; }
