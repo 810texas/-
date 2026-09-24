@@ -7,3 +7,13 @@ pydantic-settings>=2.2
 PyJWT>=2.8
 bcrypt>=4.1
 python-multipart>=0.0.9
+
+# ---- 真实 OCR（可选；OCR_PROVIDER=paddle 时才需要）----
+# 体积与网络：paddlepaddle 约 77MB + opencv 约 37MB + numpy 约 15MB + 其它依赖，合计约 250–350MB；
+# 首次识别会自动下载 检测/识别/方向分类 三个中文模型（几十 MB）到 ~/.paddleocr，之后完全本地离线推理。
+# 必须锁 2.x：本项目按 2.x API 调用（PaddleOCR(use_angle_cls=True, lang="ch") + .ocr(img, cls=True)）。
+# 安装：.venv\Scripts\python.exe -m pip install -r requirements.txt
+paddleocr>=2.7,<3.0
+paddlepaddle>=2.6,<3.0
+# paddle 2.x 不兼容 numpy 2.x（np.sctypes 等已移除），这里显式压住上限
+numpy>=1.24,<2

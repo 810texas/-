@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     OCR_PROVIDER: str = "mock"
     LLM_PROVIDER: str = "mock"
 
+    # PaddleOCR（OCR_PROVIDER=paddle 时生效）：本地推理，影像与结果都不出本机
+    PADDLE_OCR_LANG: str = "ch"
+    PADDLE_OCR_USE_GPU: bool = False
+    # 关掉 ppocr 的 DEBUG 日志（每次识别都会打一大段参数与进度条）
+    PADDLE_OCR_SHOW_LOG: bool = False
+    # 离线部署：留空表示首次运行时自动联网下载模型到 ~/.paddleocr；
+    # 填了目录则直接用现成模型，完全不联网
+    PADDLE_OCR_DET_MODEL_DIR: str = ""
+    PADDLE_OCR_REC_MODEL_DIR: str = ""
+    PADDLE_OCR_CLS_MODEL_DIR: str = ""
+
     # CORS
     CORS_ORIGINS: str = "http://localhost:5173"
 

@@ -1,11 +1,28 @@
-"""OCR 抽象与 provider 注册：mock（默认）/ paddle（本地部署，需自装依赖）。"""
+"""OCR 抽象与 provider 注册：mock（默认）/ paddle（本地部署，需自装依赖）。
+
+paddle provider 说明（需求 2.1 / 5.2）：
+- 模型与推理**全部在本机**，发票影像不外发；
+- 引擎**懒加载**（首次识别时才初始化）：因为下方 ``_REGISTRY`` 会在 import 时实例化
+  provider，构造函数里加载模型会让「mock 模式」也被迫加载模型与重依赖；
+- 字段抽取逻辑独立在 ``invoice_fields.py``（纯标准库，可离线单测）。
+"""
 from __future__ import annotations
 
 import hashlib
 import random
+import threading
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from typing import Protocol
+from typing import Any, Protocol
+
+from app.core.config import get_settings
+from app.services.ocr.invoice_fields import (
+    FIELD_NAMES,
+    TextLine,
+    extract_invoice_fields,
+)
+
+settings = get_settings()
 
 
 @dataclass
@@ -78,19 +95,186 @@ class MockOcrProvider:
         return OcrResult(fields=fields, confidence=overall, provider=self.name, raw_text=text)
 
 
-class PaddleOcrProvider:
-    """二期/生产 provider 占位：本地 PaddleOCR 部署后在此接入（需求 2.1）。
+def _decode_image(image_bytes: bytes) -> Any:
+    """发票影像 bytes → BGR ndarray（cv2 由 paddleocr 的传递依赖提供，惰性导入）。
 
-    注意：OCR 属 CPU 密集任务，正式接入时应交后台 Worker 进程池，
-    不应在请求线程内直接调用（需求 5.1）。
+    解码失败属于「整张图都用不了」，与「单个字段没命中」不同，这里明确抛错，
+    会被 service 层记成 ocr_task.FAILED 并把原因回传前端。
+    """
+    try:
+        import cv2
+        import numpy as np
+    except ImportError as exc:  # pragma: no cover - 依赖缺失路径
+        raise RuntimeError(
+            "缺少图像解码依赖（opencv-python / numpy）。请执行："
+            ".venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+        ) from exc
+
+    buffer = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+    if image is None:
+        raise RuntimeError("发票影像解码失败：文件可能已损坏，或不是有效的 JPG/PNG")
+    return image
+
+
+def _rec_from_page(page: Any) -> tuple[Any, Any]:
+    """取 3.x 结果对象里的 rec_texts / rec_scores；取不到返回 (None, None)。"""
+    getter = getattr(page, "get", None)
+    if not callable(getter):
+        return None, None
+    try:
+        return getter("rec_texts"), getter("rec_scores")
+    except Exception:
+        return None, None
+
+
+def _flatten_ocr_lines(raw: Any) -> list[TextLine]:
+    """把 PaddleOCR 的返回展开成 [(text, confidence)]。
+
+    - 2.x：``[[ [box, (text, score)], ... ]]``（每个元素是一张图的结果）
+    - 3.x：``[ <dict-like: rec_texts/rec_scores> ]``
+    """
+    lines: list[TextLine] = []
+    for page in raw or []:
+        texts, scores = _rec_from_page(page)
+        if texts is not None:
+            scores = scores if scores is not None else []
+            for index, text in enumerate(texts):
+                score = float(scores[index]) if index < len(scores) else 0.0
+                lines.append(TextLine(text=str(text), confidence=score))
+            continue
+
+        for item in page or []:
+            try:
+                text, score = item[1][0], item[1][1]
+            except (TypeError, IndexError, KeyError):
+                continue
+            lines.append(TextLine(text=str(text), confidence=float(score)))
+    return lines
+
+
+class PaddleOcrProvider:
+    """本地 PaddleOCR provider（需求 2.1）：CPU 推理，影像与结果都不出本机。
+
+    - 引擎懒加载 + 进程内单例：首次识别时初始化，之后复用；
+    - 识别调用加锁串行化：PaddleOCR 预测器在多线程下不稳定，而 FastAPI 的同步
+      端点跑在线程池里，不加锁会有并发隐患。将来按需求 5.1 改成 Worker 进程池后，
+      这里的锁可以去掉。
     """
 
     name = "paddle"
 
+    def __init__(self) -> None:
+        # 构造函数必须保持轻量：_REGISTRY 在 import 时就会实例化本类
+        self._engine: Any = None
+        self._engine_lock = threading.Lock()
+        self._infer_lock = threading.Lock()
+
+    # ---------------------------------------------------------------- 引擎
+    def _build_engine(self) -> Any:
+        try:
+            from paddleocr import PaddleOCR
+        except ImportError as exc:
+            raise RuntimeError(
+                "未安装 PaddleOCR。请在 backend 目录执行："
+                ".venv\\Scripts\\python.exe -m pip install -r requirements.txt"
+                '（或 pip install "paddleocr>=2.7,<3.0" "paddlepaddle>=2.6,<3.0"）'
+            ) from exc
+
+        base: dict[str, Any] = {
+            "use_angle_cls": True,
+            "lang": settings.PADDLE_OCR_LANG,
+            "show_log": settings.PADDLE_OCR_SHOW_LOG,
+        }
+        if settings.PADDLE_OCR_USE_GPU:
+            base["use_gpu"] = True
+        # 离线部署：填了模型目录就不联网下载
+        for key, value in (
+            ("det_model_dir", settings.PADDLE_OCR_DET_MODEL_DIR),
+            ("rec_model_dir", settings.PADDLE_OCR_REC_MODEL_DIR),
+            ("cls_model_dir", settings.PADDLE_OCR_CLS_MODEL_DIR),
+        ):
+            if value:
+                base[key] = value
+
+        # 万一装成了 3.x：参数名变了（use_angle_cls → use_textline_orientation），给一次机会
+        drop_for_v3 = ("use_angle_cls", "use_gpu", "show_log")
+        fallback = {k: v for k, v in base.items() if k not in drop_for_v3}
+        fallback["use_textline_orientation"] = True
+        if settings.PADDLE_OCR_USE_GPU:
+            fallback["device"] = "gpu"
+
+        last_error: Exception | None = None
+        for kwargs in (base, fallback):
+            try:
+                return PaddleOCR(**kwargs)
+            except (TypeError, ValueError) as exc:
+                # 参数不被接受：换下一组参数再试
+                last_error = exc
+            except Exception as exc:  # 模型下载失败 / 目录不存在 / 权重损坏等
+                raise RuntimeError(
+                    "PaddleOCR 初始化失败：常见原因是模型未下载或网络不可达。"
+                    "请先联网触发一次模型下载，或把已有模型目录填入 "
+                    "PADDLE_OCR_DET_MODEL_DIR / PADDLE_OCR_REC_MODEL_DIR / PADDLE_OCR_CLS_MODEL_DIR。"
+                    f"原始错误：{exc}"
+                ) from exc
+
+        raise RuntimeError(
+            "PaddleOCR 初始化失败：初始化参数不被接受，通常是把 3.x 装上了。"
+            '请改装 2.x：pip install "paddleocr>=2.7,<3.0" "paddlepaddle>=2.6,<3.0"。'
+            f"原始错误：{last_error}"
+        )
+
+    def _get_engine(self) -> Any:
+        if self._engine is None:
+            with self._engine_lock:
+                if self._engine is None:
+                    self._engine = self._build_engine()
+        return self._engine
+
+    # ---------------------------------------------------------------- 识别
+    def _infer(self, engine: Any, image: Any) -> Any:
+        """调用引擎。2.x 用 ``.ocr(image, cls=True)``；3.x 退化为 ``.predict(image)``。"""
+        ocr = getattr(engine, "ocr", None)
+        if callable(ocr):
+            try:
+                return ocr(image, cls=True)
+            except TypeError:
+                return ocr(image)
+        return engine.predict(image)
+
     def recognize(self, image_bytes: bytes, hint: str = "") -> OcrResult:
-        raise NotImplementedError(
-            "PaddleOCR provider 未安装。请执行 pip install paddleocr paddlepaddle，"
-            "并在 app/services/ocr/paddle_provider.py 中接入识别与字段映射逻辑。"
+        """识别一张发票影像。hint 保留以维持 provider 接口，当前未使用。"""
+        engine = self._get_engine()
+        image = _decode_image(image_bytes)
+
+        with self._infer_lock:
+            raw = self._infer(engine, image)
+
+        lines = _flatten_ocr_lines(raw)
+        hits = extract_invoice_fields(lines)
+
+        # 边界转换：字段没命中时提取层给的是 None，但 service 层会跳过「缺失的键」，
+        # 而 invoice_no 是非空列 —— 所以这里统一落成空串（0 置信度），
+        # 让发票仍能入库并标记「待人工确认」，而不是 INSERT NULL 报 500。
+        fields = {
+            name: OcrField(
+                value=hit.value if hit.value is not None else "",
+                confidence=float(hit.confidence) if hit.confidence is not None else 0.0,
+            )
+            for name, hit in hits.items()
+        }
+
+        # 与 mock 口径一致：整体置信度 = 10 个字段置信度取平均（缺失按 0 计），
+        # 缺失越多整体越低，service 层据此置 need_confirm=1。
+        found = [hit.confidence for hit in hits.values() if hit.confidence is not None]
+        overall = round(sum(found) / len(FIELD_NAMES), 2) if found else 0.0
+
+        return OcrResult(
+            fields=fields,
+            confidence=overall,
+            provider=self.name,
+            raw_text="\n".join(line.text for line in lines),
         )
 
 
