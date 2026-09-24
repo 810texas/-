@@ -42,6 +42,11 @@ class Settings(BaseSettings):
     MAX_UPLOAD_MB: int = 10
     UPLOAD_DIR: str = "storage/uploads"
 
+    # 写接口限流（需求 5.2）：按分钟滑动窗口；RATE_LIMIT_ENABLED=false 可一键关闭
+    RATE_LIMIT_ENABLED: bool = True
+    RATE_LIMIT_WRITE_PER_MINUTE: int = 300
+    RATE_LIMIT_LOGIN_PER_MINUTE: int = 60
+
     # 登录安全：连续 5 次错误锁定 15 分钟
     LOGIN_MAX_ATTEMPTS: int = 5
     LOGIN_LOCK_MINUTES: int = 15
