@@ -285,10 +285,6 @@ def case_flow() -> int:
         f"{hit[0]['old_value']} → {hit[0]['new_value']} by {hit[0]['operator']}" if hit else "无记录",
     )
 
-    # 第二张也要选类别：费用类别必填已在预审中硬拦截（本用例只关注第一张的留痕）
-    second = detail["invoices"][1]
-    c.patch_json(f"/invoices/{second['id']}", {"category": "办公"})
-
     # 预审预览 + 提交
     status, preview = c.get(f"/reimbursements/audit?reimbursement_id={rid}")
     check("提交前预审预览可用", status == 200, str(preview)[:80])
@@ -327,12 +323,7 @@ def case_flow() -> int:
 
 
 def _make_invoice(
-    no: str,
-    amount: float,
-    rid: int,
-    code: str = "044001900111",
-    dedup_key: str | None = None,
-    category: str | None = "其他",
+    no: str, amount: float, rid: int, code: str = "044001900111", dedup_key: str | None = None
 ):
     """直接造一张未占用发票，用于隔离验证单条预审规则。"""
     from sqlalchemy import select
@@ -354,7 +345,6 @@ def _make_invoice(
             amount_excl_tax=amount,
             tax_amount=0.0,
             total_amount=amount,
-            category=category,
             ocr_confidence=0.95,
             occupy_state="FREE",
         )
@@ -432,15 +422,6 @@ def case_rules(approved_rid: int) -> None:
     reasons = (body.get("detail") or {}).get("reasons") if isinstance(body.get("detail"), dict) else []
     check("金额勾稽不符被硬拦截 409",
           status == 409 and any("勾稽" in r for r in (reasons or [])),
-          (reasons or [""])[0][:70])
-
-    # --- 规则 2b：费用类别必填（未选类别硬拦截） ---
-    rid_cat = _new_draft(c, "费用类别必填验证单")
-    _make_invoice("CAT0001", 100.0, rid_cat, "044001900777", category=None)
-    status, body = c.post_json(f"/reimbursements/{rid_cat}/submit", {})
-    reasons = (body.get("detail") or {}).get("reasons") if isinstance(body.get("detail"), dict) else []
-    check("费用类别未填被硬拦截 409",
-          status == 409 and any("费用类别" in r for r in (reasons or [])),
           (reasons or [""])[0][:70])
 
     # --- 规则 3：部门预算（研发部单笔 5000 / 月度 50000） ---

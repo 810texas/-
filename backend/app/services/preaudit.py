@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
-from app.models.document import EXPENSE_CATEGORIES, Invoice, Reimbursement
+from app.models.document import Invoice, Reimbursement
 
 settings = get_settings()
 
@@ -73,21 +73,6 @@ def check_duplicates(
         other = db.execute(stmt).scalar_one_or_none()
         if other:
             problems.append(f"发票 {inv.invoice_no} 已在单据 {other} 中报销，存在重复")
-    return problems
-
-
-def check_category(invoices: list[Invoice]) -> list[str]:
-    """费用类别必填（需求 3.1 第 4 项）：未选或非法类别硬拦截。
-
-    放在重复/金额勾稽之后，保证既有拦截原因顺序不变。
-    """
-    problems: list[str] = []
-    options = "/".join(EXPENSE_CATEGORIES)
-    for inv in invoices:
-        if not inv.category or inv.category not in EXPENSE_CATEGORIES:
-            problems.append(
-                f"发票 {inv.invoice_no} 未选择费用类别，请提交前选择（{options}）"
-            )
     return problems
 
 
@@ -173,7 +158,6 @@ def run_preaudit(
     result = PreAuditResult()
     result.hard_blocks.extend(check_duplicates(db, invoices, reimbursement.id))
     result.hard_blocks.extend(check_amount_consistency(invoices))
-    result.hard_blocks.extend(check_category(invoices))
     budget_hard, budget_warn, _ = check_budget(db, dept_id, dept_name, amount)
     result.hard_blocks.extend(budget_hard)
     result.warnings.extend(check_buyer(invoices))

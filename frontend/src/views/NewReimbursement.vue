@@ -334,15 +334,6 @@ async function preview() {
 
 async function submit() {
   if (!rid.value) return ElMessage.warning('请先创建草稿并上传发票')
-  // 费用类别必填：后端预审会硬拦截，这里先做快速反馈
-  const missing = invoices.value.filter((row) => !row.category)
-  if (missing.length) {
-    return ElMessage.warning(
-      `请先为每张发票选择费用类别（未填 ${missing.length} 张：${missing
-        .map((row) => row.invoice_no)
-        .join('、')}）`,
-    )
-  }
   submitting.value = true
   try {
     const res = await api.submit(rid.value)
